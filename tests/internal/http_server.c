@@ -1,6 +1,8 @@
 /* -*- Mode: C; tab-width: 4; indent-tabs-mode: nil; c-basic-offset: 4 -*- */
 
 #include <fluent-bit/flb_config.h>
+#include <fluent-bit/flb_compression.h>
+#include <fluent-bit/flb_snappy.h>
 #include <fluent-bit/flb_engine.h>
 #include <fluent-bit/flb_http_common.h>
 #include <fluent-bit/flb_io.h>
@@ -905,7 +907,56 @@ void test_http_server_session_destroy_is_reentrant_safe()
     flb_free(session);
 }
 
+static void test_http_request_bounded_inflation(void)
+{
+    struct flb_http_request request;
+    char *encodings[] = {"gzip", "zstd", "snappy"};
+    unsigned char payload[4096];
+    cfl_sds_t compressed_body;
+    char *snappy_buffer;
+    size_t snappy_size;
+    size_t index;
+    int ret;
+
+    memset(payload, 'x', sizeof(payload));
+    for (index = 0; index < sizeof(encodings) / sizeof(encodings[0]); index++) {
+        memset(&request, 0, sizeof(request));
+        TEST_ASSERT(flb_http_request_init(&request) == 0);
+        request.body = cfl_sds_create_len((char *) payload, sizeof(payload));
+        TEST_ASSERT(request.body != NULL);
+        if (strcmp(encodings[index], "snappy") == 0) {
+            ret = flb_snappy_compress((char *) payload, sizeof(payload),
+                                      &snappy_buffer, &snappy_size);
+            TEST_ASSERT(ret == 0);
+            cfl_sds_destroy(request.body);
+            request.body = cfl_sds_create_len(snappy_buffer, snappy_size);
+            flb_free(snappy_buffer);
+            TEST_ASSERT(request.body != NULL);
+            TEST_ASSERT(flb_http_request_set_content_encoding(&request, "snappy") == 0);
+        }
+        else {
+            ret = flb_http_request_compress_body(&request, encodings[index]);
+            TEST_ASSERT(ret == 0);
+        }
+        compressed_body = request.body;
+
+        ret = flb_http_request_uncompress_body_bounded(&request, sizeof(payload) - 1);
+        TEST_CHECK(ret == FLB_DECOMPRESSOR_LIMIT_EXCEEDED);
+        TEST_CHECK(request.body == compressed_body);
+        TEST_CHECK(flb_http_request_get_header(&request, "Content-Encoding") != NULL);
+
+        ret = flb_http_request_uncompress_body_bounded(&request, sizeof(payload));
+        TEST_CHECK(ret == 0);
+        TEST_CHECK(cfl_sds_len(request.body) == sizeof(payload));
+        TEST_CHECK(memcmp(request.body, payload, sizeof(payload)) == 0);
+        TEST_CHECK(request.content_length == sizeof(payload));
+        TEST_CHECK(flb_http_request_get_header(&request, "Content-Encoding") == NULL);
+        flb_http_request_destroy(&request);
+    }
+}
+
 TEST_LIST = {
+    { "http_request_bounded_inflation", test_http_request_bounded_inflation },
     { "http_server_accept_reaps_stale_sessions_with_limit",
       test_http_server_accept_reaps_stale_sessions_with_limit },
     { "http_server_managed_accept_defers_uncapped_reaping",
