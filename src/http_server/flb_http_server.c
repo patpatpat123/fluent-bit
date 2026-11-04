@@ -31,6 +31,7 @@
 
 #include <fluent-bit/flb_snappy.h>
 #include <fluent-bit/flb_gzip.h>
+#include <fluent-bit/flb_compression.h>
 #include <cfl/cfl_atomic.h>
 
 /* PRIVATE */
@@ -230,6 +231,7 @@ static int flb_http_server_apply_options(struct flb_http_server *session,
 
     session->downstream = NULL;
     session->buffer_max_size = options->buffer_max_size;
+    session->decompression_max_size = options->decompression_max_size;
     session->buffer_chunk_size = options->buffer_chunk_size;
     session->max_connections = options->max_connections;
     cfl_atomic_store(&session->active_connections, 0);
@@ -527,17 +529,25 @@ static int flb_http_server_client_activity_event_handler(void *data)
             request->content_length = cfl_sds_len(request->body);
         }
 
+        result = 0;
         if ((server->flags & FLB_HTTP_SERVER_FLAG_AUTO_INFLATE) != 0) {
-            result = flb_http_request_uncompress_body(request);
+            result = flb_http_request_uncompress_body_bounded(
+                         request, server->decompression_max_size);
 
-            if (result != 0) {
+            if (result != 0 && server->decompression_max_size == 0) {
                 flb_http_server_session_destroy(session);
 
                 return -1;
             }
         }
 
-        if (server->request_callback != NULL) {
+        if (result != 0) {
+            /* Never dispatch a body that failed bounded decompression. */
+            flb_http_response_set_status(response,
+                result == FLB_DECOMPRESSOR_LIMIT_EXCEEDED ? 413 : 400);
+            flb_http_response_commit(response);
+        }
+        else if (server->request_callback != NULL) {
             callback_context.server = server;
             callback_context.request = request;
             callback_context.response = response;
@@ -1035,6 +1045,7 @@ static int flb_http_server_worker_initialize(struct flb_downstream_worker *worke
     options.system_context = parent->system_context;
     options.idle_timeout = parent->idle_timeout;
     options.buffer_max_size = parent->buffer_max_size;
+    options.decompression_max_size = parent->decompression_max_size;
     options.buffer_chunk_size = parent->buffer_chunk_size;
     options.max_connections = parent->max_connections;
     options.connection_counter = parent->connection_counter;
