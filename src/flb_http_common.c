@@ -29,6 +29,7 @@
 #include <fluent-bit/flb_snappy.h>
 #include <fluent-bit/flb_gzip.h>
 #include <fluent-bit/flb_zstd.h>
+#include <fluent-bit/flb_compression.h>
 #ifdef __EMSCRIPTEN__
 #include <fluent-bit/wasm/flb_wasm_http.h>
 #endif
@@ -464,8 +465,13 @@ int flb_http_request_compress_body(
     return 0;
 }
 
-int flb_http_request_uncompress_body(
-    struct flb_http_request *request)
+int flb_http_request_uncompress_body(struct flb_http_request *request)
+{
+    return flb_http_request_uncompress_body_bounded(request, 0);
+}
+
+int flb_http_request_uncompress_body_bounded(struct flb_http_request *request,
+                                            size_t output_limit)
 {
     char      *content_encoding_header_value;
     char       new_content_length[21];
@@ -473,6 +479,8 @@ int flb_http_request_uncompress_body(
     char      *output_buffer;
     size_t     output_size;
     int        result;
+    int        algorithm;
+    void      *decoded;
 
     result = 0;
 
@@ -488,7 +496,30 @@ int flb_http_request_uncompress_body(
         return 0;
     }
 
-    if (strncasecmp(content_encoding_header_value, "gzip", 4) == 0) {
+    if (output_limit > 0) {
+        algorithm = FLB_COMPRESSION_ALGORITHM_NONE;
+        if (strcasecmp(content_encoding_header_value, "gzip") == 0) {
+            algorithm = FLB_COMPRESSION_ALGORITHM_GZIP;
+        }
+        else if (strcasecmp(content_encoding_header_value, "zstd") == 0) {
+            algorithm = FLB_COMPRESSION_ALGORITHM_ZSTD;
+        }
+        else if (strcasecmp(content_encoding_header_value, "snappy") == 0) {
+            algorithm = FLB_COMPRESSION_ALGORITHM_SNAPPY;
+        }
+        if (algorithm == FLB_COMPRESSION_ALGORITHM_NONE) {
+            return FLB_DECOMPRESSOR_FAILURE;
+        }
+        result = flb_decompress_buffer(algorithm, request->body,
+                                      cfl_sds_len(request->body), output_limit,
+                                      &decoded, &output_size);
+        if (result != FLB_DECOMPRESSOR_SUCCESS) {
+            return result;
+        }
+        output_buffer = decoded;
+        result = 1;
+    }
+    else if (strncasecmp(content_encoding_header_value, "gzip", 4) == 0) {
         result = uncompress_gzip(&output_buffer,
                                     &output_size,
                                     request->body,

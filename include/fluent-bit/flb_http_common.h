@@ -219,6 +219,13 @@ int flb_http_request_compress_body(
     struct flb_http_request *request,
     char *content_encoding_header_value);
 
+/*
+ * Bound expanded gzip, zstd or Snappy bytes; zero preserves legacy decoding.
+ * Return FLB_DECOMPRESSOR_LIMIT_EXCEEDED on overflow, leaving the body intact.
+ */
+int flb_http_request_uncompress_body_bounded(struct flb_http_request *request,
+                                            size_t output_limit);
+
 int flb_http_request_uncompress_body(
     struct flb_http_request *request);
 
